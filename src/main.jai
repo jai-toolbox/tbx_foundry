@@ -74,16 +74,7 @@ main :: () {
             // render the built in color renderer objects if there are any
             render(*wp3.camera_per_object_transform_color_renderer);
 
-            // bind the packed texture array to texture unit 0 so the shader can sample from it
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D_ARRAY, packed_rendering.packed_texture_array_gl_id);
-
-            // bind the bounding box lookup texture to texture unit 1 so the shader can read uv regions
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_1D, packed_rendering.packed_texture_bounding_boxes_gl_id);
-
-            // draw all queued packed texture geometry
-            render(*packed_rendering.renderer);
+            render(*packed_rendering);
 
             // reset simp's internal shader tracking so it rebinds its own shaders correctly after our custom rendering
             context.simp.current_shader = null;
