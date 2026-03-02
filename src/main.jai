@@ -5,11 +5,12 @@
 #import "tbx/engine";
 #import "tbx/opengl";
 #import "tbx/model_loading";
+#import "tbx/time";
 #import "tbx/texture_packing";
 
 main :: () {
 
-    pack_textures(1024);
+    pack_textures(4096);
 
     defer print("Program ended gracefully, if you stop seeing this then something bad happened.\n");
 
@@ -25,12 +26,14 @@ main :: () {
     // todo it might be nice in the future to not have to do this in multiple steps
 
     model := load_wavefront_model("data/spot");
+    // model := load_wavefront_model("data/sam_max/sam_max");
 
     new_renderables := load_wavefront_into_packed_texture_renderables(
         *model,
         *packed_rendering.metadata,
         *packed_rendering.renderer
     );
+
     for new_renderables {
         array_add(*packed_rendering.renderables, it);
     }
@@ -39,6 +42,7 @@ main :: () {
 
     while !wp3.end_program {
         mark_frame_start(*wp3);
+        start_section(*wp3.section_timer, "tick");
 
         per_frame_update(*wp3);
 
@@ -82,6 +86,8 @@ main :: () {
             render_tick_stats(*wp3);
             render_movement_stats(*wp3);
             render_camera_stats(*wp3);
+            update_graph_visual(*wp3.performance_graph);
+            render_performance_graph(*wp3);
         } else {
             // reset simp's shader tracking before drawing menus
             context.simp.current_shader = null;
@@ -93,6 +99,7 @@ main :: () {
 
         sleep_to_maintain_max_fps(*wp3);
         mark_frame_end(*wp3);
+        end_section(*wp3.section_timer, "tick");
     }
 }
 
