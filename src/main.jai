@@ -1,18 +1,52 @@
+/*
+
+f = move
+d = rotate
+s = scale
+
+wer = front right up
+
+tab = cycle selection mode (vertex/edge/face)
+
+*/
+
 #import "Basic";
 #import "Math";
 #import "GL";
 
+#import "Window_Creation";
+
 #import "tbx/engine";
 #import "tbx/opengl";
-#import "tbx/model_loading";
 #import "tbx/time";
-#import "tbx/texture_packing";
+#import "tbx/geometry";
+#import "tbx/camera";
+
+Transform :: struct {
+    position: Vector3;
+    scale: Vector3 = .{1, 1, 1};
+    rotation: Quaternion = .{0, 0, 0, 1};
+}
+
+get_transform_matrix :: (using transform: Transform) -> Matrix4 {
+    s := make_scale_matrix4(scale);
+    r := rotation_matrix(Matrix4, rotation);
+    t := make_translation_matrix4(position);
+    return t * r * s;
+}
+
+#load "picker.jai";
+#load "editable_mesh.jai";
+#load "operations.jai";
+
+Mode :: enum {
+    MOVE_AND_LOOK;
+    FREE_MOUSE;
+}
 
 main :: () {
 
-    pack_textures(4096);
-
-    defer print("Program ended gracefully, if you stop seeing this then something bad happened.\n");
+    defer print("program ended gracefully, if you stop seeing this then something bad happened\n");
 
     wp3: Windowed_Program_3D;
     wp3.vsync = false;
@@ -20,25 +54,33 @@ main :: () {
     wp3.window_name = "Foundry";
     init(*wp3);
 
-    packed_rendering: Packed_Texture_Rendering;
-    init(*packed_rendering);
+    mode := Mode.MOVE_AND_LOOK;
+    operation_just_confirmed := false;
 
-    // todo it might be nice in the future to not have to do this in multiple steps
+    point_renderer: Camera_Per_Object_Transform_Position_Point_Color_Renderer;
+    init(*point_renderer);
 
-    model := load_wavefront_model("data/spot");
-    // model := load_wavefront_model("data/sam_max/sam_max");
+    // edge selection renderer (using color renderer for now, will switch to line color renderer later)
+    // edge_selection_renderer: Camera_Per_Object_Transform_Line_Color_Renderer;
+    edge_selection_renderer: Camera_Per_Object_Transform_Color_Renderer;
+    init(*edge_selection_renderer);
 
-    new_renderables := load_wavefront_into_packed_texture_renderables(
-        *model,
-        *packed_rendering.metadata,
-        *packed_rendering.renderer
-    );
+    // face selection overlay renderer (using color renderer for now, will switch to color alpha renderer later)
+    face_selection_overlay_renderer: Camera_Per_Object_Transform_Color_Alpha_Renderer;
+    init(*face_selection_overlay_renderer);
 
-    for new_renderables {
-        array_add(*packed_rendering.renderables, it);
-    }
+    picker: Screen_Space_Object_Picker;
+    init(*picker, xx 1920, xx 1080);
 
-    start_time := current_time_monotonic();
+    // create an editable cube
+    em: Editable_Mesh;
+    init_editable_mesh(*em, color = .{0.2, 0.6, 0.9});
+    make_cube(*em.mesh, 1.0);
+    rebuild_renderables(*em);
+    buffer_all(*em, *wp3.camera_per_object_transform_color_renderer, *point_renderer, *edge_selection_renderer, *face_selection_overlay_renderer, *picker);
+
+    grid: Camera_Infinite_Grid;
+    init(*grid);
 
     while !wp3.end_program {
         mark_frame_start(*wp3);
@@ -46,41 +88,230 @@ main :: () {
 
         per_frame_update(*wp3);
 
-        // set the packed texture renderer's camera uniforms to match the same camera the 3d program uses
-        // use the packed texture shader so that uniform calls apply to it
-        glUseProgram(packed_rendering.renderer.shader_program_gl_handle);
-        set_world_to_camera_uniform(*packed_rendering.renderer, wp3.camera.world_to_camera);
-        set_camera_to_clip_uniform(*packed_rendering.renderer, wp3.camera.camera_to_clip);
+        // object transform movement via arrow keys
+        moved := false;
+        offset: Vector3;
 
-        for packed_rendering.renderables queue_render(*packed_rendering.renderer, it.object_index); 
+        if is_key_just_pressed(.ARROW_UP)    { offset.y += 0.25; moved = true; }
+        if is_key_just_pressed(.ARROW_DOWN)  { offset.y -= 0.25; moved = true; }
+        if is_key_just_pressed(.ARROW_RIGHT) { offset.x += 0.25; moved = true; }
+        if is_key_just_pressed(.ARROW_LEFT)  { offset.x -= 0.25; moved = true; }
 
-        // spin the model for fun I guess
-        elapsed := elapsed_seconds(start_time);
-        for packed_rendering.renderables {
-            // transform := make_transform_matrix4(.{0, 0, 0}, .{0, 0, 1}, elapsed * TAU * 0.1);
-            // set_local_to_world_matrix(*packed_rendering.renderer, it, transform);
+        if moved {
+            em.transform.position += offset;
+            // update_transform(*em, *wp3.camera_per_object_transform_color_renderer, *point_renderer, *edge_selection_renderer, *face_selection_overlay_renderer, *picker);
         }
+
+        // cycle selection mode with tab
+        if is_key_just_pressed(.TAB) && em.op_state.active_op == .NONE {
+            unbuffer_active_picking_renderable(*em, *picker);
+
+            if em.selection_mode == {
+                case .VERTEX; em.selection_mode = .EDGE;
+                case .EDGE;   em.selection_mode = .FACE;
+                case .FACE;   em.selection_mode = .VERTEX;
+            }
+
+            clear_selection(*em);
+            update_selection_colors(*em);
+            buffer_active_picking_renderable(*em, *picker);
+            rebuffer_object(*point_renderer, em.vertex_selection_renderable);
+            rebuffer_object(*edge_selection_renderer, em.edge_selection_renderable);
+            rebuffer_object(*face_selection_overlay_renderer, em.face_selection_overlay_renderable);
+        }
+
+        // set camera uniforms for point renderer (vertex selection display)
+        glUseProgram(point_renderer.shader_program_gl_handle);
+        set_point_size_uniform(*point_renderer, 6.0);
+        set_world_to_camera_uniform(*point_renderer, wp3.camera.world_to_camera);
+        set_camera_to_clip_uniform(*point_renderer, wp3.camera.camera_to_clip);
+
+        // set camera uniforms for edge selection renderer
+        glUseProgram(edge_selection_renderer.shader_program_gl_handle);
+        set_world_to_camera_uniform(*edge_selection_renderer, wp3.camera.world_to_camera);
+        set_camera_to_clip_uniform(*edge_selection_renderer, wp3.camera.camera_to_clip);
+
+        // set camera uniforms for face selection overlay renderer
+        glUseProgram(face_selection_overlay_renderer.shader_program_gl_handle);
+        set_world_to_camera_uniform(*face_selection_overlay_renderer, wp3.camera.world_to_camera);
+        set_camera_to_clip_uniform(*face_selection_overlay_renderer, wp3.camera.camera_to_clip);
+
+        // queue the appropriate selection renderable based on mode
+        if em.selection_mode == {
+            case .VERTEX;
+                queue_render(*point_renderer, em.vertex_selection_renderable.object_index);
+            case .EDGE;
+                queue_render(*edge_selection_renderer, em.edge_selection_renderable.object_index);
+            case .FACE;
+                queue_render(*edge_selection_renderer, em.edge_selection_renderable.object_index);
+                queue_render(*face_selection_overlay_renderer, em.face_selection_overlay_renderable.object_index);
+        }
+
+        // picking pass
+        glUseProgram(picker.renderer.shader_program_gl_handle);
+        set_world_to_camera_uniform(*picker.renderer, wp3.camera.world_to_camera);
+        set_camera_to_clip_uniform(*picker.renderer, wp3.camera.camera_to_clip);
+        set_point_size_uniform(*picker.renderer, 6.0);
+
+        enable_writing(*picker);
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_PROGRAM_POINT_SIZE);
+
+        // queue the active picking renderable based on selection mode
+        if em.selection_mode == {
+            case .VERTEX;
+                queue_render(*picker.renderer, em.vertex_selection_picking_renderable.object_index);
+                render(*picker.renderer, GL_POINTS);
+            case .EDGE;
+                queue_render(*picker.renderer, em.edge_selection_picking_renderable.object_index);
+                render(*picker.renderer, GL_LINES);
+            case .FACE;
+                queue_render(*picker.renderer, em.face_selection_picking_renderable.object_index);
+                render(*picker.renderer, GL_TRIANGLES);
+        }
+
+        disable_writing();
+
+        // cancel on escape
+        if is_key_just_pressed(.ESCAPE) {
+            if em.op_state.active_op != .NONE {
+                cancel_operation(*em);
+                sync_positions_from_mesh(*em);
+                rebuild_renderables(*em);
+                rebuffer_all(*em, *wp3.camera_per_object_transform_color_renderer, *point_renderer, *edge_selection_renderer, *face_selection_overlay_renderer, *picker);
+            }
+        }
+
+        // mode toggle / cancel on right click
+        if is_key_just_pressed(.MOUSE_BUTTON_RIGHT) {
+            if em.op_state.active_op != .NONE {
+                cancel_operation(*em);
+                sync_positions_from_mesh(*em);
+                rebuild_renderables(*em);
+                rebuffer_all(*em, *wp3.camera_per_object_transform_color_renderer, *point_renderer, *edge_selection_renderer, *face_selection_overlay_renderer, *picker);
+            } else {
+                wp3.camera_look_active = !wp3.camera_look_active;
+                mode = ifx mode == .MOVE_AND_LOOK then .FREE_MOUSE else .MOVE_AND_LOOK;
+            }
+        }
+
+        // operations only in free mouse mode
+        if mode == .FREE_MOUSE {
+
+            // start new operations
+            if em.op_state.active_op == .NONE {
+                mx, my, _ok := get_mouse_pointer_position(wp3.window, true);
+
+                if is_key_just_pressed(#char "F")  begin_operation(*em, .MOVE,   xx mx, xx my);
+                if is_key_just_pressed(#char "D")  begin_operation(*em, .ROTATE, xx mx, xx my);
+                if is_key_just_pressed(#char "S")  begin_operation(*em, .SCALE,  xx mx, xx my);
+            }
+
+            // apply active operation every frame
+            if em.op_state.active_op != .NONE {
+                mx, my, _ok := get_mouse_pointer_position(wp3.window, true);
+
+                if is_key_just_pressed(#char "W") em.op_state.axis_constraint = 2;
+                if is_key_just_pressed(#char "E") em.op_state.axis_constraint = 0;
+                if is_key_just_pressed(#char "R") em.op_state.axis_constraint = 1;
+
+                if em.op_state.active_op == {
+                    case .MOVE;
+                        apply_move(*em, xx mx, xx my, *wp3.camera, wp3.window_width, wp3.window_height);
+                    case .ROTATE;
+                        apply_rotate(*em, xx mx, xx my, *wp3.camera);
+                    case .SCALE;
+                        apply_scale(*em, xx mx, xx my);
+                }
+
+                sync_positions_from_mesh(*em);
+                rebuild_renderables(*em);
+                update_selection_colors(*em);
+                rebuffer_all(*em, *wp3.camera_per_object_transform_color_renderer, *point_renderer, *edge_selection_renderer, *face_selection_overlay_renderer, *picker);
+
+                if is_key_just_pressed(.MOUSE_BUTTON_LEFT) {
+                    confirm_operation(*em);
+                    operation_just_confirmed = true;
+                }
+            }
+        }
+
+        // picking, only when no operation is active
+        if is_key_just_pressed(.MOUSE_BUTTON_LEFT) && em.op_state.active_op == .NONE {
+            if operation_just_confirmed {
+                operation_just_confirmed = false;
+            } else {
+                mx, my, mouse_success := get_mouse_pointer_position(wp3.window, true);
+                picked_id := pick_closest_in_radius(*picker, xx mx, xx my);
+
+                if picked_id != NO_OBJECT_ID {
+                    if is_key_down(.SHIFT) {
+                        handle_picking(*em, cast(u32) picked_id);
+                    } else {
+                        clear_selection(*em);
+                        handle_picking(*em, cast(u32) picked_id);
+                    }
+                } else {
+                    if !is_key_down(.SHIFT) {
+                        clear_selection(*em);
+                        update_selection_colors(*em);
+                    }
+                }
+
+                // rebuffer the appropriate selection renderable
+                if em.selection_mode == {
+                    case .VERTEX;
+                        rebuffer_object(*point_renderer, em.vertex_selection_renderable);
+                    case .EDGE;
+                        rebuffer_object(*edge_selection_renderer, em.edge_selection_renderable);
+                    case .FACE;
+                        rebuffer_object(*face_selection_overlay_renderer, em.face_selection_overlay_renderable);
+                }
+            }
+        }
+
+        queue_render(*wp3.camera_per_object_transform_color_renderer, em.surface_renderable.object_index);
 
         Simp :: #import "Simp";
         Simp.update_window(wp3.window);
         Simp.clear_render_target(.15, .08, .08, 1);
 
         if wp3.current_menu == .NONE {
-            // enable writing to the depth buffer so closer geometry occludes further geometry
             glDepthMask(GL_TRUE);
-
-            // turn on depth testing so fragments behind other fragments get discarded
             glEnable(GL_DEPTH_TEST);
-
-            // clear the depth buffer so we start fresh each frame
             glClear(GL_DEPTH_BUFFER_BIT);
 
-            // render the built in color renderer objects if there are any
             render(*wp3.camera_per_object_transform_color_renderer);
 
-            render(*packed_rendering);
+            // render the active selection overlay
+            if em.selection_mode == {
+                case .VERTEX;
+                    glEnable(GL_PROGRAM_POINT_SIZE);
+                    render(*point_renderer);
+                case .EDGE;
+                    render(*edge_selection_renderer, GL_LINES);
+                case .FACE;
+                    // render edge wireframe as visual aid (non-selectable)
+                    render(*edge_selection_renderer, GL_LINES);
 
-            // reset simp's internal shader tracking so it rebinds its own shaders correctly after our custom rendering
+                    glEnable(GL_BLEND);
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                    glDepthMask(GL_FALSE);
+                    glDepthFunc(GL_LEQUAL);
+                    render(*face_selection_overlay_renderer);
+                    glDepthFunc(GL_LESS);
+                    glDepthMask(GL_TRUE);
+                    glDisable(GL_BLEND);
+            }
+
+            glDepthMask(GL_FALSE);
+            render(*grid,
+                wp3.camera.camera_to_clip,
+                wp3.camera.world_to_camera,
+                wp3.camera.position
+            );
+            glDepthMask(GL_TRUE);
+
             context.simp.current_shader = null;
 
             render_tick_stats(*wp3);
@@ -89,18 +320,19 @@ main :: () {
             update_graph_visual(*wp3.performance_graph);
             render_performance_graph(*wp3);
         } else {
-            // reset simp's shader tracking before drawing menus
             context.simp.current_shader = null;
             render_menus(*wp3.wp);
         }
 
-        // present the rendered frame to the screen
         Simp.swap_buffers(wp3.window, false);
 
         sleep_to_maintain_max_fps(*wp3);
         mark_frame_end(*wp3);
         end_section(*wp3.section_timer, "tick");
     }
+
+    destroy_editable_mesh(*em);
+    deinit(*grid);
 }
 
 
