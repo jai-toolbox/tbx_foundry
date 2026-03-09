@@ -110,7 +110,7 @@ read_region :: (using picker: *Screen_Space_Object_Picker, x: u32, y: u32, w: u3
 
 pick_closest_in_radius :: (picker: *Screen_Space_Object_Picker, mouse_x: s32, mouse_y: s32, radius: s32 = 15) -> u32 {
 
-    // Clamp region to framebuffer bounds
+    // clamp region to framebuffer bounds
     x0 := clamp(mouse_x - radius, 0, cast(s32) picker.width  - 1);
     y0 := clamp(mouse_y - radius, 0, cast(s32) picker.height - 1);
     x1 := clamp(mouse_x + radius, 0, cast(s32) picker.width  - 1);
@@ -136,7 +136,7 @@ pick_closest_in_radius :: (picker: *Screen_Space_Object_Picker, mouse_x: s32, mo
             id := buffer[row * cast(s32)w + col];
             if id == NO_OBJECT_ID  continue;
 
-            // Pixel position in screen space
+            // pixel position in screen space
             px := x0 + col;
             py := y0 + row;
 
@@ -144,7 +144,7 @@ pick_closest_in_radius :: (picker: *Screen_Space_Object_Picker, mouse_x: s32, mo
             dy := py - mouse_y;
             dist_sq := dx * dx + dy * dy;
 
-            // Skip pixels outside the circle
+            // skip pixels outside the circle
             if dist_sq > radius * radius  continue;
 
             if dist_sq < best_dist_sq {
